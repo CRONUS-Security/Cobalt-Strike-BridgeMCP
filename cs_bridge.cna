@@ -1,0 +1,373 @@
+import aggressor.*;
+import java.net.InetSocketAddress;
+import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpExchange;
+import java.util.concurrent.Executors;
+import java.lang.reflect.Array;
+
+global('$BRIDGE_PORT $BRIDGE_TOKEN $_server_running');
+$BRIDGE_PORT     = 17777;
+$BRIDGE_TOKEN    = "cs-mcp-bridge-secret";
+$_server_running = 0;
+
+sub send_json_response {
+    local('$exchange $code $body $bytes $resp $headers');
+    ($exchange, $code, $body) = @_;
+    $headers = [$exchange getResponseHeaders];
+    [$headers set: "Content-Type", "application/json"];
+    [$headers set: "Access-Control-Allow-Origin", "*"];
+    $bytes = [$body getBytes: "UTF-8"];
+    [$exchange sendResponseHeaders: $code, size($bytes)];
+    $resp = [$exchange getResponseBody];
+    [$resp write: $bytes];
+    [$resp flush];
+    [$resp close];
+}
+
+sub check_auth {
+    local('$exchange $headers $vals $auth');
+
+    println("[cs-mcp-bridge] check_auth: enter");
+
+    $exchange = @_[0];
+    println("[cs-mcp-bridge] check_auth: got exchange");
+
+    $headers  = [$exchange getRequestHeaders];
+    println("[cs-mcp-bridge] check_auth: got headers = " . $headers);
+
+    $vals = [$headers get: "X-Bridge-Token"];
+    println("[cs-mcp-bridge] check_auth: vals = " . $vals);
+
+    if ($vals is $null) {
+        println("[cs-mcp-bridge] check_auth: no token header");
+        return 0;
+    }
+
+    $auth = [$vals get: 0];
+    println("[cs-mcp-bridge] check_auth: auth = " . $auth);
+
+    if ($auth is $null) {
+        return 0;
+    }
+
+    $auth = "" . $auth;
+    return ([$auth equals: $BRIDGE_TOKEN]);
+}
+
+sub read_body {
+    local('$exchange $stream $len $buf');
+    $exchange = @_[0];
+    $stream   = [$exchange getRequestBody];
+    $len      = [[$exchange getRequestHeaders] getFirst: "Content-Length"];
+    if ($len eq "") {
+        return "";
+    }
+    if ($len is $null) {
+        return "";
+    }
+    if (int($len) <= 0) {
+        return "";
+    }
+    $buf = [java.lang.reflect.Array newInstance: [java.lang.Byte TYPE], int($len)];
+    [$stream read: $buf];
+    return [new java.lang.String: $buf, "UTF-8"];
+}
+
+sub parse_json_field {
+    local('$body $field $pattern');
+    ($body, $field) = @_;
+    $pattern = "\"" . $field . "\"\\s*:\\s*\"([^\"]+)\"";
+    if ($body ismatch $pattern) {
+        return matched()[0];
+    }
+    $pattern = "\"" . $field . "\"\\s*:\\s*([0-9]+)";
+    if ($body ismatch $pattern) {
+        return matched()[0];
+    }
+    return "";
+}
+
+sub handle_list_beacons {
+    local('$exchange @beacons @result %b $json_beacon');
+    $exchange = @_[0];
+    @beacons  = beacons();
+    @result   = @();
+    foreach %b (@beacons) {
+        $json_beacon  = "{";
+        $json_beacon .= "\"id\": \""       . %b["id"]       . "\", ";
+        $json_beacon .= "\"user\": \""     . %b["user"]     . "\", ";
+        $json_beacon .= "\"computer\": \"" . %b["computer"] . "\", ";
+        $json_beacon .= "\"host\": \""     . %b["host"]     . "\", ";
+        $json_beacon .= "\"pid\": "        . %b["pid"]      . ", ";
+        $json_beacon .= "\"os\": \""       . %b["os"]       . "\", ";
+        $json_beacon .= "\"arch\": \""     . %b["arch"]     . "\", ";
+        $json_beacon .= "\"is64\": "       . %b["is64"]     . ", ";
+        $json_beacon .= "\"last\": "       . %b["last"]     . ", ";
+        $json_beacon .= "\"internal\": \"" . %b["internal"] . "\", ";
+        $json_beacon .= "\"note\": \""     . %b["note"]     . "\", ";
+        $json_beacon .= "\"listener\": \"" . %b["listener"] . "\"";
+        $json_beacon .= "}";
+        push(@result, $json_beacon);
+    }
+    send_json_response($exchange, 200, "{\"beacons\": [" . join(", ", @result) . "]}");
+}
+
+sub handle_list_listeners {
+    local('$exchange @listeners @result $l');
+    $exchange  = @_[0];
+    @listeners = listeners();
+    @result    = @();
+    foreach $l (@listeners) {
+        push(@result, "{\"name\": \"" . $l . "\"}");
+    }
+    send_json_response($exchange, 200, "{\"listeners\": [" . join(", ", @result) . "]}");
+}
+
+sub handle_beacon_shell {
+    local('$exchange $body $bid $cmd');
+    ($exchange, $body) = @_;
+    $bid = parse_json_field($body, "id");
+    $cmd = parse_json_field($body, "command");
+    if ($bid eq "" || $cmd eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing id or command\"}");
+        return;
+    }
+    bshell($bid, $cmd);
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"command\": \"" . $cmd . "\"}");
+}
+
+sub handle_beacon_run {
+    local('$exchange $body $bid $cmd');
+    ($exchange, $body) = @_;
+    $bid = parse_json_field($body, "id");
+    $cmd = parse_json_field($body, "command");
+    if ($bid eq "" || $cmd eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing id or command\"}");
+        return;
+    }
+    brun($bid, $cmd);
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"command\": \"" . $cmd . "\"}");
+}
+
+sub handle_beacon_sleep {
+    local('$exchange $body $bid $sleep $jitter');
+    ($exchange, $body) = @_;
+    $bid    = parse_json_field($body, "id");
+    $sleep  = parse_json_field($body, "sleep");
+    $jitter = parse_json_field($body, "jitter");
+    if ($bid eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing beacon id\"}");
+        return;
+    }
+    if ($sleep eq "")  { $sleep  = 60; }
+    if ($jitter eq "") { $jitter = 20; }
+    bsleep($bid, int($sleep), int($jitter));
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"sleep\": " . $sleep . ", \"jitter\": " . $jitter . "}");
+}
+
+sub handle_beacon_download {
+    local('$exchange $body $bid $remote_path');
+    ($exchange, $body) = @_;
+    $bid         = parse_json_field($body, "id");
+    $remote_path = parse_json_field($body, "path");
+    if ($bid eq "" || $remote_path eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing id or path\"}");
+        return;
+    }
+    bdownload($bid, $remote_path);
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"path\": \"" . $remote_path . "\"}");
+}
+
+sub handle_execute_assembly {
+    local('$exchange $body $bid $assembly_path $args');
+    ($exchange, $body) = @_;
+    $bid           = parse_json_field($body, "id");
+    $assembly_path = parse_json_field($body, "assembly_path");
+    $args          = parse_json_field($body, "args");
+    if ($bid eq "" || $assembly_path eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing id or assembly_path\"}");
+        return;
+    }
+    bexecute_assembly($bid, $assembly_path, $args);
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"assembly\": \"" . $assembly_path . "\"}");
+}
+
+sub handle_beacon_inject {
+    local('$exchange $body $bid $pid $listener $arch');
+    ($exchange, $body) = @_;
+    $bid      = parse_json_field($body, "id");
+    $pid      = parse_json_field($body, "pid");
+    $listener = parse_json_field($body, "listener");
+    $arch     = parse_json_field($body, "arch");
+    if ($bid eq "" || $pid eq "" || $listener eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing id, pid, or listener\"}");
+        return;
+    }
+    if ($arch eq "") { $arch = "x64"; }
+    binject($bid, int($pid), $listener, $arch);
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"target_pid\": " . $pid . "}");
+}
+
+sub handle_beacon_note {
+    local('$exchange $body $bid $note');
+    ($exchange, $body) = @_;
+    $bid  = parse_json_field($body, "id");
+    $note = parse_json_field($body, "note");
+    if ($bid eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing beacon id\"}");
+        return;
+    }
+    bnote($bid, $note);
+    send_json_response($exchange, 200,
+        "{\"status\": \"ok\", \"bid\": \"" . $bid . "\", \"note\": \"" . $note . "\"}");
+}
+
+sub handle_beacon_remove {
+    local('$exchange $body $bid');
+    ($exchange, $body) = @_;
+    $bid = parse_json_field($body, "id");
+    if ($bid eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing beacon id\"}");
+        return;
+    }
+    beacon_remove($bid);
+    send_json_response($exchange, 200,
+        "{\"status\": \"removed\", \"bid\": \"" . $bid . "\"}");
+}
+
+sub handle_beacon_tasks {
+    local('$exchange @result %b %t $json_t');
+    $exchange = @_[0];
+    @result   = @();
+    foreach %b (beacons()) {
+        foreach %t (beacon_log(%b["id"])) {
+            if (%t["type"] eq "task" || %t["type"] eq "input") {
+                $json_t  = "{";
+                $json_t .= "\"bid\": \""  . %b["id"]    . "\", ";
+                $json_t .= "\"time\": "   . %t["when"]  . ", ";
+                $json_t .= "\"type\": \"" . %t["type"]  . "\", ";
+                $json_t .= "\"text\": \"" . str_replace(%t["text"], "\"", "'") . "\"";
+                $json_t .= "}";
+                push(@result, $json_t);
+            }
+        }
+    }
+    send_json_response($exchange, 200, "{\"tasks\": [" . join(", ", @result) . "]}");
+}
+
+sub handle_beacon_upload {
+    local('$exchange $body $bid $local_path');
+    ($exchange, $body) = @_;
+    $bid        = parse_json_field($body, "id");
+    $local_path = parse_json_field($body, "local_path");
+    if ($bid eq "" || $local_path eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing id or local_path\"}");
+        return;
+    }
+    bupload($bid, $local_path);
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"file\": \"" . $local_path . "\"}");
+}
+
+sub handle_create_listener {
+    local('$exchange $body $name $payload $host $port');
+    ($exchange, $body) = @_;
+    $name    = parse_json_field($body, "name");
+    $payload = parse_json_field($body, "payload");
+    $host    = parse_json_field($body, "host");
+    $port    = parse_json_field($body, "port");
+    if ($name eq "" || $payload eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing name or payload\"}");
+        return;
+    }
+    if ($port eq "") { $port = "443"; }
+    listener_create_ext($name, $payload, lhost => $host, lport => int($port));
+    send_json_response($exchange, 200,
+        "{\"status\": \"created\", \"name\": \"" . $name . "\", \"payload\": \"" . $payload . "\"}");
+}
+
+sub handle_request {
+    local('$exchange $path $method $body');
+    $exchange = @_[0];
+    $path     = [[$exchange getRequestURI] getPath];
+    $method   = [$exchange getRequestMethod];
+
+    if ($method eq "OPTIONS") {
+        send_json_response($exchange, 200, "{}");
+        return;
+    }
+
+    if ($path ne "/health" && !check_auth($exchange)) {
+        send_json_response($exchange, 401, "{\"error\": \"Unauthorized\"}");
+        return;
+    }
+
+    $body = read_body($exchange);
+
+    if ($path eq "/health" && $method eq "GET") {
+        send_json_response($exchange, 200,
+            "{\"status\": \"ok\", \"bridge\": \"cs-cna-mcp\", \"port\": " . $BRIDGE_PORT . "}");
+    } else if ($path eq "/beacons" && $method eq "GET") {
+        handle_list_beacons($exchange);
+    } else if ($path eq "/listeners" && $method eq "GET") {
+        handle_list_listeners($exchange);
+    } else if ($path eq "/beacon/shell" && $method eq "POST") {
+        handle_beacon_shell($exchange, $body);
+    } else if ($path eq "/beacon/run" && $method eq "POST") {
+        handle_beacon_run($exchange, $body);
+    } else if ($path eq "/beacon/sleep" && $method eq "POST") {
+        handle_beacon_sleep($exchange, $body);
+    } else if ($path eq "/beacon/download" && $method eq "POST") {
+        handle_beacon_download($exchange, $body);
+    } else if ($path eq "/beacon/execute_assembly" && $method eq "POST") {
+        handle_execute_assembly($exchange, $body);
+    } else if ($path eq "/beacon/inject" && $method eq "POST") {
+        handle_beacon_inject($exchange, $body);
+    } else if ($path eq "/beacon/note" && $method eq "POST") {
+        handle_beacon_note($exchange, $body);
+    } else if ($path eq "/beacon/remove" && $method eq "POST") {
+        handle_beacon_remove($exchange, $body);
+    } else if ($path eq "/beacon/tasks" && $method eq "GET") {
+        handle_beacon_tasks($exchange);
+    } else if ($path eq "/beacon/upload" && $method eq "POST") {
+        handle_beacon_upload($exchange, $body);
+    } else if ($path eq "/listener/create" && $method eq "POST") {
+        handle_create_listener($exchange, $body);
+    } else {
+        send_json_response($exchange, 404,
+            "{\"error\": \"Not Found\", \"path\": \"" . $path . "\"}");
+    }
+}
+
+sub start_bridge_server {
+    local('$addr $server $executor');
+
+    if ($_server_running) {
+        println("[cs-mcp-bridge] Server already running on port " . $BRIDGE_PORT);
+        return;
+    }
+
+    println("[cs-mcp-bridge] Starting HTTP server on port " . $BRIDGE_PORT);
+
+    $addr   = [new InetSocketAddress: $BRIDGE_PORT];
+    $server = [HttpServer create: $addr, 10];
+    [$server createContext: "/", {
+        handle_request($1);
+    }];
+    $executor = [Executors newFixedThreadPool: 4];
+    [$server setExecutor: $executor];
+    [$server start];
+
+    $_server_running = 1;
+    println("[cs-mcp-bridge] Bridge server started on http://127.0.0.1:" . $BRIDGE_PORT);
+    println("[cs-mcp-bridge] Token: " . $BRIDGE_TOKEN);
+}
+
+println("[cs-mcp-bridge] Loading CS MCP Bridge...");
+start_bridge_server();
