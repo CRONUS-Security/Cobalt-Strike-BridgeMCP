@@ -19,17 +19,14 @@ from fastmcp import FastMCP
 BRIDGE_URL   = os.getenv("CS_BRIDGE_URL",   "http://127.0.0.1:17777")
 BRIDGE_TOKEN = os.getenv("CS_BRIDGE_TOKEN", "cs-mcp-bridge-secret")
 
+# Load instructions from external file
+prompt_file = "./prompt/main.txt"
+with open(prompt_file, "r", encoding="utf-8") as f:
+    instructions = f.read()
+
 mcp = FastMCP(
     name="Cobalt Strike CNA Bridge",
-    instructions="""
-你是一个红队行动辅助助手，通过 Cobalt Strike Aggressor Script 桥接服务与正在运行的
-Cobalt Strike 客户端交互。
-
-规则：
-- 执行任何破坏性操作前必须向用户确认
-- 不要伪造 Beacon 输出，仅返回 API 实际返回的数据
-- 执行命令后告知用户：命令已进入队列，需等待 Beacon 下次回连才能取回结果
-""",
+    instructions=instructions,
 )
 
 logger = logging.getLogger(__name__)
