@@ -1,0 +1,64 @@
+# modules/utils.cna
+# HTTP 工具函数：响应发送、认证校验、请求体读取、JSON字段解析
+
+sub send_json_response {
+    local('$exchange $code $body $bytes $resp $headers');
+    ($exchange, $code, $body) = @_;
+    $headers = [$exchange getResponseHeaders];
+    [$headers set: "Content-Type", "application/json"];
+    [$headers set: "Access-Control-Allow-Origin", "*"];
+    $bytes = [$body getBytes: "UTF-8"];
+    [$exchange sendResponseHeaders: $code, size($bytes)];
+    $resp = [$exchange getResponseBody];
+    [$resp write: $bytes];
+    [$resp flush];
+    [$resp close];
+}
+
+sub check_auth {
+    local('$exchange $headers $vals $auth');
+
+    $exchange = @_[0];
+    $headers  = [$exchange getRequestHeaders];
+    $vals     = [$headers get: "X-Bridge-Token"];
+
+    if ($vals is $null) {
+        return 0;
+    }
+
+    $auth = [$vals get: 0];
+
+    if ($auth is $null) {
+        return 0;
+    }
+
+    $auth = "" . $auth;
+    return ([$auth equals: $BRIDGE_TOKEN]);
+}
+
+sub read_body {
+    local('$exchange $stream $len $buf');
+    $exchange = @_[0];
+    $stream   = [$exchange getRequestBody];
+    $len      = [[$exchange getRequestHeaders] getFirst: "Content-Length"];
+    if ($len eq "" || $len is $null || int($len) <= 0) {
+        return "";
+    }
+    $buf = [java.lang.reflect.Array newInstance: [java.lang.Byte TYPE], int($len)];
+    [$stream read: $buf];
+    return [new java.lang.String: $buf, "UTF-8"];
+}
+
+sub parse_json_field {
+    local('$body $field $pattern');
+    ($body, $field) = @_;
+    $pattern = "\"" . $field . "\"\\s*:\\s*\"([^\"]+)\"";
+    if ($body ismatch $pattern) {
+        return matched()[0];
+    }
+    $pattern = "\"" . $field . "\"\\s*:\\s*([0-9]+)";
+    if ($body ismatch $pattern) {
+        return matched()[0];
+    }
+    return "";
+}

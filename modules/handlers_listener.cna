@@ -1,0 +1,30 @@
+# modules/handlers_listener.cna
+# Listener 相关路由处理器
+
+sub handle_list_listeners {
+    local('$exchange @listeners @result $l');
+    $exchange  = @_[0];
+    @listeners = listeners();
+    @result    = @();
+    foreach $l (@listeners) {
+        push(@result, "{\"name\": \"" . $l . "\"}");
+    }
+    send_json_response($exchange, 200, "{\"listeners\": [" . join(", ", @result) . "]}");
+}
+
+sub handle_create_listener {
+    local('$exchange $body $name $payload $host $port');
+    ($exchange, $body) = @_;
+    $name    = parse_json_field($body, "name");
+    $payload = parse_json_field($body, "payload");
+    $host    = parse_json_field($body, "host");
+    $port    = parse_json_field($body, "port");
+    if ($name eq "" || $payload eq "") {
+        send_json_response($exchange, 400, "{\"error\": \"Missing name or payload\"}");
+        return;
+    }
+    if ($port eq "") { $port = "443"; }
+    listener_create_ext($name, $payload, lhost => $host, lport => int($port));
+    send_json_response($exchange, 200,
+        "{\"status\": \"created\", \"name\": \"" . $name . "\", \"payload\": \"" . $payload . "\"}");
+}

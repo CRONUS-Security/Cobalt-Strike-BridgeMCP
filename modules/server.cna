@@ -1,0 +1,79 @@
+# modules/server.cna
+# HTTP 请求路由分发 + Bridge 服务器启动/停止
+
+sub handle_request {
+    local('$exchange $path $method $body');
+    $exchange = @_[0];
+    $path     = [[$exchange getRequestURI] getPath];
+    $method   = [$exchange getRequestMethod];
+
+    if ($method eq "OPTIONS") {
+        send_json_response($exchange, 200, "{}");
+        return;
+    }
+
+    if ($path ne "/health" && !check_auth($exchange)) {
+        send_json_response($exchange, 401, "{\"error\": \"Unauthorized\"}");
+        return;
+    }
+
+    $body = read_body($exchange);
+
+    if ($path eq "/health" && $method eq "GET") {
+        send_json_response($exchange, 200,
+            "{\"status\": \"ok\", \"bridge\": \"cs-cna-mcp\", \"port\": " . $BRIDGE_PORT . "}");
+    } else if ($path eq "/beacons" && $method eq "GET") {
+        handle_list_beacons($exchange);
+    } else if ($path eq "/listeners" && $method eq "GET") {
+        handle_list_listeners($exchange);
+    } else if ($path eq "/beacon/shell" && $method eq "POST") {
+        handle_beacon_shell($exchange, $body);
+    } else if ($path eq "/beacon/run" && $method eq "POST") {
+        handle_beacon_run($exchange, $body);
+    } else if ($path eq "/beacon/sleep" && $method eq "POST") {
+        handle_beacon_sleep($exchange, $body);
+    } else if ($path eq "/beacon/download" && $method eq "POST") {
+        handle_beacon_download($exchange, $body);
+    } else if ($path eq "/beacon/execute_assembly" && $method eq "POST") {
+        handle_execute_assembly($exchange, $body);
+    } else if ($path eq "/beacon/inject" && $method eq "POST") {
+        handle_beacon_inject($exchange, $body);
+    } else if ($path eq "/beacon/note" && $method eq "POST") {
+        handle_beacon_note($exchange, $body);
+    } else if ($path eq "/beacon/remove" && $method eq "POST") {
+        handle_beacon_remove($exchange, $body);
+    } else if ($path eq "/beacon/tasks" && $method eq "GET") {
+        handle_beacon_tasks($exchange);
+    } else if ($path eq "/beacon/upload" && $method eq "POST") {
+        handle_beacon_upload($exchange, $body);
+    } else if ($path eq "/listener/create" && $method eq "POST") {
+        handle_create_listener($exchange, $body);
+    } else {
+        send_json_response($exchange, 404,
+            "{\"error\": \"Not Found\", \"path\": \"" . $path . "\"}");
+    }
+}
+
+sub start_bridge_server {
+    local('$addr $server $executor');
+
+    if ($_server_running) {
+        println("[cs-mcp-bridge] Server already running on port " . $BRIDGE_PORT);
+        return;
+    }
+
+    println("[cs-mcp-bridge] Starting HTTP server on port " . $BRIDGE_PORT);
+
+    $addr   = [new InetSocketAddress: $BRIDGE_PORT];
+    $server = [HttpServer create: $addr, 10];
+    [$server createContext: "/", {
+        handle_request($1);
+    }];
+    $executor = [Executors newFixedThreadPool: 4];
+    [$server setExecutor: $executor];
+    [$server start];
+
+    $_server_running = 1;
+    println("[cs-mcp-bridge] Bridge server started on http://127.0.0.1:" . $BRIDGE_PORT);
+    println("[cs-mcp-bridge] Token: " . $BRIDGE_TOKEN);
+}
